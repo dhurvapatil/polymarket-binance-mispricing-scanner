@@ -4,6 +4,68 @@
 import axios from 'axios';
 import { Logger } from '../utils/logger.js';
 
+// ─── Binance European options helpers (pure, exported for testing) ────────────
+
+/**
+ * Parse a Binance options symbol such as "BTC-260424-120000-C".
+ * Expiry is 08:00 UTC on the encoded date. Returns null if malformed.
+ */
+export function parseOptionSymbol(symbol) {
+  if (typeof symbol !== 'string') return null;
+  const parts = symbol.split('-');
+  if (parts.length !== 4) return null;
+  const [underlying, dateStr, strikeStr, type] = parts;
+  if (!/^\d{6}$/.test(dateStr) || (type !== 'C' && type !== 'P')) return null;
+  const strike = parseFloat(strikeStr);
+  if (!Number.isFinite(strike) || strike <= 0) return null;
+  const expiry = new Date(Date.UTC(
+    2000 + parseInt(dateStr.slice(0, 2), 10),
+    parseInt(dateStr.slice(2, 4), 10) - 1,
+    parseInt(dateStr.slice(4, 6), 10),
+    8, 0, 0
+  ));
+  return { underlying, expiry, strike, type };
+}
+
+/**
+ * Pick the call contract whose IV best proxies the market: same underlying,
+ * not expired, expiring on/after the market's expiry, nearest strike (weighted
+ * 3x) and nearest expiry (0.01 per day). Returns null if nothing qualifies or
+ * the IV is unusable. No smile interpolation: the IV of the nearest listed
+ * strike is used as-is.
+ */
+export function selectBestCall(contracts, underlying, strike, targetExpiry, now = Date.now()) {
+  if (!Array.isArray(contracts) || !targetExpiry || !(strike > 0)) return null;
+  const targetMs = new Date(targetExpiry).getTime();
+  let best = null;
+  let bestScore = Infinity;
+
+  for (const c of contracts) {
+    const p = parseOptionSymbol(c.symbol);
+    if (!p || p.type !== 'C' || p.underlying !== underlying) continue;
+    const expMs = p.expiry.getTime();
+    if (expMs < now || expMs < targetMs) continue;
+    const iv = parseFloat(c.markIV);
+    if (!Number.isFinite(iv) || iv <= 0) continue;
+
+    const strikeDiff = Math.abs(p.strike - strike) / strike;
+    const expiryDiffDays = (expMs - targetMs) / (1000 * 60 * 60 * 24);
+    const score = strikeDiff * 3 + expiryDiffDays * 0.01;
+    if (score < bestScore) {
+      bestScore = score;
+      best = {
+        symbol: c.symbol,
+        strike: p.strike,
+        expiry: p.expiry,
+        impliedVolatility: iv,
+        markPrice: parseFloat(c.markPrice),
+        indexPrice: parseFloat(c.indexPrice)
+      };
+    }
+  }
+  return best;
+}
+
 export class BinanceService {
   constructor() {
     this.baseURL = 'https://fapi.binance.com/fapi/v1';
@@ -48,6 +110,13 @@ export class BinanceService {
         return Promise.reject(error);
       }
     );
+
+    // Separate client for the public Binance European options API
+    this.optionsClient = axios.create({
+      baseURL: 'https://eapi.binance.com/eapi/v1',
+      timeout: 10000,
+    });
+    this.optionsMarkCache = null;
 
     // Cache for contract info and funding rates to reduce API calls
     this.contractCache = new Map();
@@ -260,5 +329,18 @@ export class BinanceService {
       Logger.error('BINANCE', `Failed to calculate expiration price for ${symbol}: ${error.message}`);
       throw error;
     }
+  }
+
+  /**
+   * Fetch Binance options marks (public eapi endpoint) and return the best
+   * matching call for a Polymarket market, or null if none is listed.
+   * Marks are cached briefly to avoid refetching per market.
+   */
+  async fetchOptionsData(underlying, expiry, strikePrice) {
+    if (!this.optionsMarkCache || Date.now() - this.optionsMarkCache.timestamp > 60 * 1000) {
+      const response = await this.optionsClient.get('/mark');
+      this.optionsMarkCache = { data: response.data, timestamp: Date.now() };
+    }
+    return selectBestCall(this.optionsMarkCache.data, underlying, strikePrice, expiry);
   }
 }

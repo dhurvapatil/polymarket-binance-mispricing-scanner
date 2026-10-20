@@ -43,7 +43,8 @@ async function initializeServices(config) {
     services.arbitrage = new ArbitrageService(
       services.polymarket,
       services.binance,
-      services.telegram
+      services.telegram,
+      { minProfitThreshold: config.minProfitThreshold / 100 } // env value is in percent
     );
 
     Logger.info('BOT', '✅ All services initialized successfully');
@@ -72,7 +73,9 @@ async function runMonitoringCycle() {
     const polyStart = Date.now();
     Logger.info('MONITOR', 'Fetching Polymarket data...');
     const allMarkets = await services.polymarket.fetchActiveMarkets();
-    const cryptoMarkets = services.polymarket.filterCryptoMarkets(allMarkets);
+    const cryptoMarkets = services.polymarket
+      .filterCryptoMarkets(allMarkets)
+      .map(m => services.polymarket.calculateImpliedProbabilities(m)); // sets .probability (was never called)
     const polyTime = Date.now() - polyStart;
     Logger.info('MONITOR', `Polymarket: ${allMarkets.length} total → ${cryptoMarkets.length} crypto (${polyTime}ms)`);
 

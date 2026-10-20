@@ -7,10 +7,9 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "jest",
-    "test:watch": "jest --watch",
-    "lint": "eslint src/**/*.js",
-    "typecheck": "tsc --noEmit"
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
+    "coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage"
   },
   "keywords": [
     "arbitrage",
@@ -19,7 +18,7 @@
     "trading",
     "bot"
   ],
-  "author": "",
+  "author": "Dhruvagouda Patil",
   "license": "MIT",
   "engines": {
     "node": ">=16.0.0"

@@ -1,5 +1,5 @@
 // test-binance.js
-// Run: node test-binance.js
+// Manual live-API probe (not a Jest test; hits Binance). Run: node scripts/test-binance.js
 // Tests both futures price fetch and the new options data fetch
 
 import axios from 'axios';

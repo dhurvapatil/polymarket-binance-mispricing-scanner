@@ -9,7 +9,7 @@ import { impliedProbability, daysToYears } from './blackscholes.js';
 const RISK_FREE_RATE = 0.05;
 
 export class ArbitrageService {
-  constructor(polymarketService, binanceService, telegramService = null) {
+  constructor(polymarketService, binanceService, telegramService = null, options = {}) {
     this.polymarketService = polymarketService;
     this.binanceService = binanceService;
     this.telegramService = telegramService;
@@ -21,7 +21,8 @@ export class ArbitrageService {
       slippage: 0.001     // 0.1% slippage buffer
     };
 
-    this.minProfitThreshold = 0.005; // 0.5% minimum net profit
+    // Minimum net edge as a fraction of notional (0.005 = 0.5%)
+    this.minProfitThreshold = options.minProfitThreshold ?? 0.005;
   }
 
   // ─── Public: main entry points ───────────────────────────────────────────────
@@ -156,6 +157,10 @@ export class ArbitrageService {
 
       const currentPrice = futuresPrice.price;
       const expiry = market.expiresAt ? new Date(market.expiresAt) : null;
+      if (!expiry || isNaN(expiry.getTime())) {
+        Logger.debug('ARBITRAGE', `No valid expiry, cannot price: "${market.question}"`);
+        return null;
+      }
 
       // ── Step 3: Black-Scholes probability via Binance Options IV ───────────
       let bsProb = null;
@@ -168,16 +173,13 @@ export class ArbitrageService {
       }
 
       if (optionsData && optionsData.impliedVolatility) {
-        const T = expiry ? daysToYears(expiry) : daysToYears(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000));
+        const T = daysToYears(expiry);
         const sigma = optionsData.impliedVolatility;
         const S = currentPrice;
         const K = strikePrice;
 
-        bsProb = direction === 'bullish'
-          ? impliedProbability(S, K, T, RISK_FREE_RATE, sigma)          // P(S > K) at expiry
-          : impliedProbability(S, K, T, RISK_FREE_RATE, sigma) !== null  // P(S < K) = 1 - P(S > K)
-            ? 1 - impliedProbability(S, K, T, RISK_FREE_RATE, sigma)
-            : null;
+        const pAbove = impliedProbability(S, K, T, RISK_FREE_RATE, sigma); // P(S > K) at expiry
+        bsProb = pAbove === null ? null : (direction === 'bullish' ? pAbove : 1 - pAbove);
 
         if (bsProb !== null) {
           Logger.info('ARBITRAGE',
@@ -195,15 +197,10 @@ export class ArbitrageService {
       }
 
       // ── Step 4: Probability delta and profit model ─────────────────────────
-      const probDelta = polymarketProb - bsProb;
+      const { probDelta, positionSize, grossProfit, totalFees, netProfit, profitMargin } =
+        this.computeEdge(polymarketProb, bsProb);
 
       if (Math.abs(probDelta) < 0.001) return null; // < 0.1% difference, not worth it
-
-      const positionSize = 1000; // $1,000 notional for calculation purposes
-      const grossProfit = Math.abs(probDelta) * positionSize;
-      const totalFees = positionSize * (this.fees.polymarket + this.fees.binance + this.fees.slippage);
-      const netProfit = grossProfit - totalFees;
-      const profitMargin = netProfit / positionSize;
 
       if (profitMargin < this.minProfitThreshold) return null;
 
@@ -261,6 +258,18 @@ export class ArbitrageService {
   // ─── Helper methods ───────────────────────────────────────────────────────────
 
   /**
+   * Gross/net edge for a Polymarket-vs-model probability gap.
+   * net = |p_poly - p_model| * size - size * (polymarket + binance + slippage fees)
+   */
+  computeEdge(polymarketProb, bsProb, positionSize = 1000) {
+    const probDelta = polymarketProb - bsProb;
+    const grossProfit = Math.abs(probDelta) * positionSize;
+    const totalFees = positionSize * (this.fees.polymarket + this.fees.binance + this.fees.slippage);
+    const netProfit = grossProfit - totalFees;
+    return { probDelta, positionSize, grossProfit, totalFees, netProfit, profitMargin: netProfit / positionSize };
+  }
+
+  /**
    * Check if a market is a binary Yes/No market.
    */
   isBinaryMarket(market) {
@@ -307,8 +316,8 @@ export class ArbitrageService {
 
     // Match patterns like $120k, $120,000, $120000, $1.2m, $1.2M
     const patterns = [
-      /\$(\d[\d,]*\.?\d*)\s*[Mm]/,   // $1.2m or $120M
-      /\$(\d[\d,]*\.?\d*)\s*[Kk]/,   // $120k or $120K
+      /\$(\d[\d,]*\.?\d*)\s*[Mm]\b/,   // $1.2m or $120M (word boundary: "$120,000 mid-June" is not millions)
+      /\$(\d[\d,]*\.?\d*)\s*[Kk]\b/,   // $120k or $120K
       /\$(\d[\d,]*)/,                  // $120,000 or $120000
     ];
 

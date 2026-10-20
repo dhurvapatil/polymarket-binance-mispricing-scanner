@@ -1,8 +1,8 @@
 // test-blackscholes.js
-// Run: node .\test-blackscholes.js  (from src/services directory)
+// Manual sanity script (not a Jest test). Run: node scripts/test-blackscholes.js
 // Uses the EXACT values from your test-binance.js output to verify the math.
 
-import { impliedProbability, blackScholesDetail, daysToYears } from './blackscholes.js';
+import { impliedProbability, blackScholesDetail, daysToYears } from '../src/services/blackscholes.js';
 
 // Values from your Test 3 output
 const S = 67457.5;   // BTC spot price
