@@ -9,7 +9,7 @@ export class Config {
     this.telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
     this.telegramChatId = process.env.TELEGRAM_CHAT_ID;
     this.binanceApiKey = process.env.BINANCE_API_KEY;
-    this.binanceApiSecret = process.env.BINANCE_API_SECRET;
+    this.binanceApiSecret = process.env.BINANCE_API_SECRET || process.env.BINANCE_SECRET_KEY; // BINANCE_SECRET_KEY accepted as legacy alias
     this.minProfitThreshold = parseFloat(process.env.MIN_PROFIT_THRESHOLD || '2.0');
     this.checkFrequencyMs = parseInt(process.env.CHECK_FREQUENCY_MS || '30000');
     this.marketFilters = (process.env.MARKET_FILTERS || 'BTC,ETH').split(',');

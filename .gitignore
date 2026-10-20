@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+
+# secrets / local config
+.env
+.env.*
+!config/.env.example
+
+# logs and runtime output
+logs/
+*.log
+npm-debug.log*
+
+# test / coverage
+coverage/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
