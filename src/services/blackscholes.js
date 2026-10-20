@@ -6,7 +6,8 @@
 // in-the-money. This is what gets compared against Polymarket's implied prob.
 
 // ─── Cumulative standard normal distribution ──────────────────────────────────
-// Abramowitz & Stegun approximation — accurate to 7 decimal places.
+// Phi(x) = 0.5 * (1 + erf(x / sqrt 2)), with erf from Abramowitz & Stegun 7.1.26
+// (max abs error ~1.5e-7).
 // No external library needed.
 function cdf(x) {
     if (x < -8) return 0;
@@ -22,8 +23,9 @@ function cdf(x) {
     const sign = x < 0 ? -1 : 1;
     const absX = Math.abs(x);
 
-    const t = 1 / (1 + p * absX);
-    const y = 1 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-absX * absX / 2);
+    const z = absX / Math.SQRT2; // erf argument
+    const t = 1 / (1 + p * z);
+    const y = 1 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-z * z);
 
     return 0.5 * (1 + sign * y);
 }
