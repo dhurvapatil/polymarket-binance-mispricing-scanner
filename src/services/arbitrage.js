@@ -318,7 +318,7 @@ export class ArbitrageService {
     const patterns = [
       /\$(\d[\d,]*\.?\d*)\s*[Mm]\b/,   // $1.2m or $120M (word boundary: "$120,000 mid-June" is not millions)
       /\$(\d[\d,]*\.?\d*)\s*[Kk]\b/,   // $120k or $120K
-      /\$(\d[\d,]*)/,                  // $120,000 or $120000
+      /\$(\d[\d,]*\.?\d*)/,            // $120,000 or $120000 or $2,500.50
     ];
 
     for (const pattern of patterns) {
