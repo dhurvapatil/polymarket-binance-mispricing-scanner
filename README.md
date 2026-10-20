@@ -1,103 +1,160 @@
-# Polymarket-Binance Arbitrage Bot
+# Polymarket x Binance Mispricing Scanner
 
-A high-performance Node.js automated trading bot that continuously monitors prediction markets on [Polymarket](https://polymarket.com/) and perpetual futures on [Binance](https://www.binance.com/) to detect and alert on profitable arbitrage opportunities.
+[![tests](https://github.com/dhurvapatil/cross-platform-arbitrage-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/dhurvapatil/cross-platform-arbitrage-bot/actions/workflows/tests.yml)
+![node](https://img.shields.io/badge/node-%3E%3D20-339933)
+![license](https://img.shields.io/badge/license-MIT-blue)
 
-## 🌟 Overview
+A Node.js scanner that prices Polymarket "will BTC be above $X on date" markets as digital options using Binance options implied volatility, then sends a Telegram alert when the gap to Polymarket's price is larger than an assumed fee model. **It is an alerting tool: it does not place orders on either venue.**
 
-The Polymarket-Binance Arbitrage Bot bridges the gap between decentralized prediction markets and centralized crypto futures. It specifically looks for discrepancies between the implied probabilities of crypto-related binary (Yes/No) questions on Polymarket (e.g., "Will Bitcoin reach $100k by December?") and the actual futures prices on Binance.
+## How it works
 
-When the implied probability on Polymarket significantly diverges from the estimated probability derived from Binance pricing—and the potential net profit exceeds your predefined minimum threshold (after accounting for trading fees and slippage)—the bot instantly sends an alert via Telegram.
+Every `CHECK_FREQUENCY_MS` the scanner runs one cycle:
 
-## ✨ Key Features
+1. **Polymarket** (Gamma API `/events`): fetch the 100 highest-volume open events, flatten to markets, keep crypto-related ones, and read the "Yes" price as the market-implied probability `p_poly`.
+2. **Binance** (public endpoints, no keys needed):
+   - USDT-perpetual last price from `fapi /ticker/price` for BTC, ETH, SOL, used as the spot proxy `S`.
+   - The options mark table from `eapi /mark` (cached 60 s), which gives the mark implied volatility (`markIV`) for each listed contract.
+3. **Parse** each question: ticker, strike `K` (`$120,000`, `$120k`, `$1.2m`), and direction (`above`/`reach` is bullish, `below`/`under` is bearish; ambiguous questions are skipped).
+4. **Price** the question as a digital option and compare with `p_poly`.
 
-- **Automated Market Filtering**: Automatically fetches active Polymarket events and filters for cryptocurrency-specific binary markets using intelligent keyword matching.
-- **Cross-Platform Price Matching**: Maps Polymarket questions to corresponding Binance USDT futures trading pairs (e.g., `BTC` -> `BTCUSDT`).
-- **Real-Time Arbitrage Engine**: Evaluates price discrepancies, calculates probability deltas, and models potential gross and net profits.
-- **Precision Fee Modeling**: Accounts for ~2.5% Polymarket fees, 0.04% Binance futures fees, and a configurable slippage buffer.
-- **Telegram Integrations**: Instantly sends high-confidence, profitable arbitrage alerts directly to your Telegram chat.
-- **Resilient & Reliable**: Advanced retry mechanisms, exponential back-off for API rate limits, and graceful shutdown handling.
+### From a Polymarket market to a digital-option probability
 
-## 🏗️ Architecture
+"BTC above $K on date T" pays 1 if `S_T > K` and 0 otherwise, which is a cash-or-nothing digital call. Under Black-Scholes with continuous compounding at rate `r`, its risk-neutral probability of finishing in the money is
 
-- `src/index.js` - Main entry point orchestration and cyclic monitoring loop.
-- `src/services/arbitrage.js` - Core engine calculating probability deltas, confidence scores, and net profit margins.
-- `src/services/polymarket.js` - Fetches and parses active markets, filtering for crypto and calculating implied odds.
-- `src/services/binance.js` - Interacts with Binance Futures to fetch current prices, contract info, and funding rates.
-- `src/services/telegram.js` - Alerting mechanism.
-- `src/utils/` - Global logging and configuration parsing utilities.
+$$
+p_{model} = N(d_2), \qquad d_2 = \frac{\ln(S/K) + \left(r - \tfrac{1}{2}\sigma^2\right)T}{\sigma\sqrt{T}}
+$$
 
-## 🚀 Getting Started
+For a "below $K" question, `p_model = 1 - N(d_2)`.
 
-### Prerequisites
+| Symbol | Source |
+|---|---|
+| `S` | Binance USDT-perp last price (a spot proxy, not the settlement index) |
+| `K` | Parsed from the question text |
+| `T` | `(market end date - now) / 365.25 days`, floored at 1 day |
+| `r` | Constant 5% (not fetched) |
+| `sigma` | `markIV` of one Binance call (see below) |
 
-- **Node.js**: Version 16.0.0 or higher
-- **NPM** or **Yarn** package manager
-- A **Telegram Bot Token** (Create one using [@BotFather](https://t.me/botfather))
-- A **Telegram Chat ID** (where the bot will send alerts)
-- (Optional) **Binance API Keys** for authenticated futures endpoints
+`N` is the standard normal CDF, computed as `0.5 * (1 + erf(x / sqrt(2)))` with the Abramowitz-Stegun 7.1.26 erf approximation (max error about 1.5e-7). Inputs are rejected (market skipped) if `S, K, T, sigma <= 0` or `sigma > 5` (500%), which is treated as a data error.
 
-### Installation
+**Volatility input.** For each market the scanner picks the Binance **call** on the same underlying that has (a) not expired, (b) expiry on or after the Polymarket end date, and (c) the lowest score `3 * |K_opt - K| / K + 0.01 * (days past the market end date)`. Its `markIV` is used as `sigma`. There is no smile interpolation: the IV of the nearest listed strike is used as is. Binance options only list a handful of underlyings, so other tickers are skipped.
 
-1. **Clone the repository or navigate to the project directory:**
-   ```bash
-   cd cross-platform-arbitrage-bot
-   ```
+### Fee model and net edge
 
-2. **Install dependencies:**
-   ```bash
-   npm install
-   ```
+Fee constants are hard-coded assumptions in `src/services/arbitrage.js`, expressed as a fraction of notional:
 
-3. **Configure the environment:**
-   Copy the provided `.env.example` file to `.env`:
-   ```bash
-   cp config/.env.example .env
-   ```
-   Open the `.env` file and populate it with your specific API keys and settings:
-   ```env
-   # Telegram Config (Required)
-   TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
-   TELEGRAM_CHAT_ID=your_telegram_chat_id_here
+| Component | Assumed rate |
+|---|---|
+| Polymarket | 2.5% |
+| Binance futures (round trip) | 0.04% |
+| Slippage buffer | 0.10% |
+| **Total** `f` | **2.64%** |
 
-   # Binance API Keys (Optional)
-   BINANCE_API_KEY=your_binance_api_key_here
-   BINANCE_API_SECRET=your_binance_api_secret_here
+With `Delta = p_poly - p_model` and a $1,000 reference notional:
 
-   # Trading & Threshold Configuration
-   MIN_PROFIT_THRESHOLD=0.005  # 0.5%
-   CHECK_FREQUENCY_MS=10000    # Run cycle every 10 seconds
-   MARKET_FILTERS=BTC,ETH
-   
-   # Logging
-   LOG_LEVEL=info
-   ```
+$$
+\text{gross} = |\Delta| \cdot 1000, \qquad
+\text{net} = |\Delta| \cdot 1000 - f \cdot 1000, \qquad
+m = \frac{\text{net}}{1000} = |\Delta| - f
+$$
 
-### Usage
+An alert is sent when `m >= MIN_PROFIT_THRESHOLD` (the env value is a percent; `0.5` means 0.5%). With the example config, the probability gap must therefore be at least 3.14 percentage points. `Delta > 0` (Polymarket richer than the model) is labelled `SELL_POLYMARKET_YES`, otherwise `BUY_POLYMARKET_YES`. Confidence is `high` for a gap above 5 pp, `medium` above 2 pp, else `low`.
 
-**Start the bot in production mode:**
-```bash
-npm start
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph ext[External APIs]
+        PM[Polymarket Gamma API]
+        BF[Binance Futures fapi]
+        BO[Binance Options eapi]
+        TG[Telegram Bot API]
+    end
+
+    IDX[index.js<br/>monitoring loop] --> POLY[services/polymarket.js<br/>fetch, parse, crypto filter, p_poly]
+    IDX --> BIN[services/binance.js<br/>prices, option-symbol parsing,<br/>IV contract selection]
+    IDX --> ARB[services/arbitrage.js<br/>strike/ticker/direction parsing,<br/>fee model, net edge, threshold]
+    ARB --> BS[services/blackscholes.js<br/>N d2, call price, T]
+    ARB --> TEL[services/telegram.js<br/>format, dedup, send]
+    POLY --> PM
+    BIN --> BF
+    BIN --> BO
+    TEL --> TG
+    CFG[utils/config.js<br/>env] --> IDX
+    LOG[utils/logger.js] -.-> IDX
 ```
 
-**Run the bot in development mode (with auto-reload via nodemon):**
-```bash
-npm run dev
+## Example alert
+
+Illustrative format only, not real output:
+
+```text
+Arbitrage Alert!
+
+Profit: 7.4%
+Price: $100,000 (BTC)
+Direction: SELL_POLYMARKET_YES
+
+Polymarket: https://polymarket.com/market/<market-id>
+Binance: https://www.binance.com/en/futures/BTCUSDT
 ```
 
-**Run Tests:**
+"Profit" is the modelled net edge `m` under the assumptions above, not a realised or guaranteed return.
+
+## Quickstart
+
+Requires Node 20+ (CI uses 20) and a Telegram bot token and chat id (create the bot with [@BotFather](https://t.me/botfather)).
+
 ```bash
-npm test
+npm ci
+cp config/.env.example .env     # then edit .env
+npm start                       # calls live Polymarket/Binance APIs and sends real Telegram messages
 ```
 
-## 📊 How It Works (The Lifecycle)
+| Variable | Meaning |
+|---|---|
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Required |
+| `BINANCE_API_KEY`, `BINANCE_API_SECRET` | Optional; only public endpoints are used today (`BINANCE_SECRET_KEY` is accepted as a legacy alias) |
+| `MIN_PROFIT_THRESHOLD` | Minimum net edge in percent (default 2.0 if unset; the example file uses 0.5) |
+| `CHECK_FREQUENCY_MS` | Poll interval, at least 1000 (default 30000) |
+| `MARKET_FILTERS` | Parsed and logged, not yet used for filtering |
+| `LOG_LEVEL`, `LOG_TO_FILE` | Logging |
 
-1. **Initialization:** The bot initializes config, validators, and essential external services.
-2. **Phase 1 (Polymarket):** The bot hits `gamma-api.polymarket.com/events`, pulls down all active markets, formats them, and isolates crypto-related binary questions.
-3. **Phase 2 (Binance Futures):** Pulls the real-time prices for tracked assets natively to Binance (`BTCUSDT`, `ETHUSDT`, `SOLUSDT`, etc).
-4. **Phase 3 (Calculation):** Calculates the delta between the Yes/No implied odds on Polymarket and the trend/price structure of the underlying on Binance Futures. Applies a fee/slippage reduction.
-5. **Phase 4 (Alerting):** If a matching pair yields a positive profit margin exceeding `MIN_PROFIT_THRESHOLD`, an alert recommendation (BUY/SELL) is sent directly to your configured Telegram ID.
-6. **Cycle Repeats:** Repeats continuously every `CHECK_FREQUENCY_MS` milliseconds.
+`.env` is git-ignored; never commit real credentials.
 
-## 🛡️ License
+## Testing
 
-This project is licensed under the MIT License. See the `package.json` for further details.
+```bash
+npm test          # Jest, ESM, no network
+npm run coverage  # adds a coverage report
+```
+
+The suite covers: normal CDF reference values and symmetry, N(d2) and call price against textbook Black-Scholes values, monotonicity and bounds, the fee and net-edge arithmetic (including the 2.64 pp break-even), threshold filtering and sorting, strike/ticker/direction parsing (including regressions), Polymarket payload parsing, Binance option-symbol parsing and contract selection, Telegram formatting and dedup, and config handling. HTTP clients are stubbed. `scripts/` holds two manual probes (not part of the suite; `scripts/test-binance.js` hits live Binance).
+
+## Limitations, and why these gaps are not free money
+
+A positive modelled edge is not a profit. Specifically:
+
+- **Fees are assumed, not measured.** The 2.64% total is a flat constant. Actual Polymarket fees, Binance fees, spreads and funding vary by market and over time, and the hedge leg is not actually modelled as a position.
+- **Liquidity and depth.** `p_poly` is the quoted Yes price, not an executable price. Order-book depth, spread and the size you can actually fill are not checked; the $1,000 notional is a reference number.
+- **Resolution and oracle risk.** Polymarket resolves on its own source and wording (a specific exchange or index, a time of day, tie-breaking rules). The model uses a Binance perp price and a Binance option expiring at 08:00 UTC, so basis and definition mismatches can swallow a small gap.
+- **Volatility-model error.** Black-Scholes assumes lognormal returns with constant vol; crypto has fat tails and a volatility smile. Using the IV of the nearest strike, from an option that may expire later than the market, is a rough proxy. Risk-neutral probability is also not a real-world forecast, and `r` is a fixed 5%.
+- **Barrier vs. terminal.** "Reach" / "hit $X by date" markets pay if the price touches `K` at any time. The scanner treats them as a terminal-date digital, which understates their probability, so some "overpriced" Polymarket readings may just be touch-vs-terminal mismatch.
+- **Latency and stale data.** Polling is every 30 s by default and reads independent APIs sequentially; prices can move between reads.
+- **Capital lock-up.** Capital on Polymarket is tied up until resolution, so a few-percent edge should be compared with the opportunity cost over that horizon.
+- **No execution layer.** The tool only alerts. There is no order placement, position tracking, hedging or risk limit.
+- **Heuristic parsing.** Ticker and direction come from keyword matching on the question text, so some wordings will be missed or misclassified (for example generic words such as "link" or "hit").
+
+None of this has been backtested, and no historical performance is claimed. The live-API path (`fetchOptionsData` against `eapi /mark`, and the Polymarket fetch) was not exercised against the live services when this README was written; the unit tests use stubbed responses.
+
+## Roadmap
+
+- Paper-trading P&L log: record every alert with executable prices and mark the outcome at resolution.
+- Backtest on historical Polymarket and Binance options snapshots to measure whether flagged gaps converge or merely reflect model error.
+- Barrier (touch) probability for "reach" markets, and an IV smile interpolation in strike and expiry.
+- Order-book aware sizing (depth and spread) instead of a flat fee constant.
+- An execution layer with explicit risk limits, behind a dry-run default.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
