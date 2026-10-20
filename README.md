@@ -1,6 +1,6 @@
 # Polymarket x Binance Mispricing Scanner
 
-[![tests](https://github.com/dhurvapatil/cross-platform-arbitrage-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/dhurvapatil/cross-platform-arbitrage-bot/actions/workflows/tests.yml)
+[![tests](https://github.com/dhurvapatil/polymarket-binance-mispricing-scanner/actions/workflows/tests.yml/badge.svg)](https://github.com/dhurvapatil/polymarket-binance-mispricing-scanner/actions/workflows/tests.yml)
 ![node](https://img.shields.io/badge/node-%3E%3D20-339933)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
